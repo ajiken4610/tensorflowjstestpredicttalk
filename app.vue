@@ -7,7 +7,11 @@ div
 
 <script setup lang="ts">
 import data from "assets/daidoumei.txt?raw";
+import FitWorker from "assets/fitWorker?worker";
 import * as tf from "@tensorflow/tfjs";
+
+// メモリたりないからCPUで。
+// tf.setBackend("cpu");
 
 let trainSequence: tf.Tensor, testSequence: tf.Tensor;
 let maxLength: number, charCount: number;
@@ -79,70 +83,8 @@ const init = async () => {
   encodedSequences.dispose();
 };
 
-const genBatch = async (
-  sequences: tf.TensorBuffer<tf.Rank, "int32">,
-  index: number[],
-  batchSize: number,
-  predictCount: number
-) => {
-  const retX = tf.tensor(
-    Array(batchSize * predictCount * (maxLength + 2)).fill(0),
-    [batchSize, predictCount, maxLength + 2],
-    "float32"
-  );
-  const xBuf = await retX.buffer();
-  const retT = tf.tensor(
-    Array(batchSize * (maxLength + 2)),
-    [batchSize, maxLength + 2],
-    "int32"
-  );
-  const tBuf = await retT.buffer();
-  for (var i = 0; i < batchSize; i++) {
-    const cursor = index[i];
-    for (var j = 0; j < predictCount; j++) {
-      for (var k = 0; k < maxLength; k++) {
-        xBuf.set(sequences.get(cursor - predictCount + j, k), i, j, k);
-      }
-    }
-    for (var j = 0; j < maxLength; j++) {
-      tBuf.set(sequences.get(cursor, j), i, j);
-    }
-  }
-  // trashes.push(retX, retT);
-  return { xs: retX, ys: retT };
-};
-
-const genData = async function* (
-  sequences: tf.Tensor,
-  batchSize = 128,
-  predictCount = 16
-) {
-  const length = sequences.shape[0] - predictCount;
-  const seqBuffer = (await sequences.buffer()) as tf.TensorBuffer<
-    tf.Rank,
-    "int32"
-  >;
-  const batchLength = Math.floor(length / batchSize);
-  while (true) {
-    const order = Array(length)
-      .fill(null)
-      .map((_, i) => i + predictCount);
-    for (var i = 0; i < order.length; i++) {
-      const index = Math.floor(Math.random() * order.length);
-      [order[i], order[index]] = [order[index], order[i]];
-    }
-    for (var i = 0; i < batchLength; i++) {
-      yield genBatch(
-        seqBuffer,
-        order.slice(i * batchSize, i * batchSize + batchSize),
-        batchSize,
-        predictCount
-      );
-    }
-  }
-};
 let model: tf.Sequential;
-const batchSize = 16;
+const batchSize = 1;
 const buildModel = () => {
   model = tf.sequential();
 
@@ -160,14 +102,12 @@ const buildModel = () => {
   model.add(
     tf.layers.timeDistributed({
       layer: tf.layers.bidirectional({
-        layer: tf.layers.gru({ units: 8 /*32*/ }),
+        layer: tf.layers.gru({ units: 32 }),
       }),
     })
   );
-  model.add(
-    tf.layers.bidirectional({ layer: tf.layers.gru({ units: 16 /* 64*/ }) })
-  );
-  model.add(tf.layers.reshape({ targetShape: [32 /* 128*/, 1] }));
+  model.add(tf.layers.bidirectional({ layer: tf.layers.gru({ units: 64 }) }));
+  model.add(tf.layers.reshape({ targetShape: [128, 1] }));
 
   // decoder
   model.add(tf.layers.gru({ units: maxLength + 2, returnSequences: true }));
@@ -178,7 +118,7 @@ const buildModel = () => {
     })
   );
 
-  const optimizer = new tf.AdagradOptimizer(0.001);
+  const optimizer = tf.train.adagrad(0.001);
   model.compile({
     optimizer,
     loss: "sparseCategoricalCrossentropy",
@@ -188,32 +128,57 @@ const buildModel = () => {
 };
 
 const fit = async () => {
+  // const worker = new FitWorker();
+
+  // worker.postMessage({
+  //   trainSequence,
+  //   maxLength,
+  //   batchSize,
+  //   testSequence,
+  //   model,
+  // });
   const es = tf.callbacks.earlyStopping({
     monitor: "valLoss",
     patience: 5,
     verbose: 1,
   });
-  const trainGenerator = genData(trainSequence, batchSize);
+  const trainGenerator = genData(trainSequence, maxLength, batchSize);
   const trainDataGenerator = tf.data
     .generator(async () => {
-      const batch = (await trainGenerator.next()).value;
-      const batchX = (await batch.xs.array()) as any[];
-      const batchY = (await batch.xs.array()) as any[];
+      const batch = (await trainGenerator.next()).value as {
+        xs: tf.Tensor;
+        ys: tf.Tensor;
+      };
+      let batchX = (await batch.xs.array()) as any[];
+      let batchY = (await batch.ys.array()) as any[];
+      const batchXT: tf.Tensor[] = Array(batchSize);
+      const batchYT: tf.Tensor[] = Array(batchSize);
+      for (var i = 0; i < batchSize; i++) {
+        batchXT[i] = tf.tensor(batchX[i]);
+        batchYT[i] = tf.tensor(batchY[i]);
+      }
+      batchX = [];
+      batchY = [];
       return (function* () {
         for (var i = 0; i < batchSize; i++) {
-          console.log("batch generated");
-          yield { xs: batchX[i], ys: batchY[i] } as tf.TensorContainer;
+          yield { xs: batchXT[i], ys: batchYT[i] } as tf.TensorContainer;
         }
         return void 0;
       })();
     })
-    .batch(1);
-  const valGenerator = genData(testSequence, batchSize);
+    .batch(batchSize);
+
+  const valGenerator = genData(testSequence, 16);
   const valDataGenerator = tf.data
     .generator(async () => {
-      const batch = (await valGenerator.next()).value;
+      const batch = (await valGenerator.next()).value as {
+        xs: tf.Tensor;
+        ys: tf.Tensor;
+      };
       const batchX = (await batch.xs.array()) as any[];
-      const batchY = (await batch.xs.array()) as any[];
+      const batchY = (await batch.ys.array()) as any[];
+      batch.xs.dispose();
+      batch.ys.dispose();
       return (function* () {
         for (var i = 0; i < batchSize; i++) {
           yield { xs: batchX[i], ys: batchY[i] } as tf.TensorContainer;
@@ -221,7 +186,7 @@ const fit = async () => {
         return void 0;
       })();
     })
-    .batch(1);
+    .batch(16);
   const history = await toRaw(model).fitDataset(trainDataGenerator, {
     batchesPerEpoch: 1,
     epochs: 1,
@@ -242,20 +207,23 @@ const fit = async () => {
         //   console.log(JSON.stringify(logs, null, 2));
         // }
         async onBatchEnd(batch: number, logs: tf.Logs | undefined) {
-          console.log("batchEnd:", batch);
-          console.log(JSON.stringify(logs, null, 2));
-          // for (const trash of trashes) {
-          //   trash.dispose();
-          // }
+          console.log("batch:", batch);
+          console.log(logs);
+        }
+        async onEpochEnd(epoch: number, logs: tf.Logs | undefined) {
+          console.log("epoch:", epoch);
+          console.log(logs);
         }
         // onYield(epoch: number, batch: number, logs: tf.Logs) {
         //   console.log("epoch:", epoch, "batch:", batch);
         // },
       })(),
     ],
+    yieldEvery: 2500,
   });
+  await model.save("indexeddb://model");
 };
-setInterval(() => {
-  console.log(tf.memory());
-}, 5000);
+// setInterval(() => {
+//   console.log(tf.memory());
+// }, 5000);
 </script>
