@@ -9,13 +9,11 @@
   },
   "devDependencies": {
     "@prettier/plugin-pug": "^2.3.0",
+    "@tensorflow/tfjs": "^4.1.0",
     "@volar/vue-language-plugin-pug": "^1.0.9",
     "nuxt": "3.0.0",
     "prettier": "^2.8.0",
     "pug": "^3.0.2",
     "sass": "^1.56.1"
-  },
-  "dependencies": {
-    "@tensorflow/tfjs": "^4.1.0"
   }
 }
