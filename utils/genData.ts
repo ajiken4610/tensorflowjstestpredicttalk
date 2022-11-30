@@ -9,7 +9,7 @@ export const genBatch = async (
   const retX = tf.tensor(
     Array(batchSize * predictCount * (maxLength + 2)).fill(0),
     [batchSize, predictCount, maxLength + 2],
-    "float32"
+    "int32"
   );
   const xBuf = await retX.buffer();
   const retT = tf.tensor(
